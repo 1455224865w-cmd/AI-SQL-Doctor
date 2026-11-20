@@ -7,10 +7,12 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from sql_doctor.analyze import compare_plans, diagnose
+from sql_doctor.i18n import install, negotiate, translate_payload
+from sql_doctor.mcp_server import mount
 
 
 class DiagnoseIn(BaseModel):
@@ -50,7 +52,9 @@ class History:
 
 
 def create_app(db_path: str = ":memory:") -> FastAPI:
-    app = FastAPI(title="AI SQL Doctor", version="0.1.0")
+    app = FastAPI(title="AI SQL Doctor", version="0.1.6")
+    install(app)
+    mount(app)
     app.state.history = History(db_path)
 
     @app.get("/api/health")
@@ -58,9 +62,10 @@ def create_app(db_path: str = ":memory:") -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/api/diagnose")
-    def run(body: DiagnoseIn):
+    def run(body: DiagnoseIn, request: Request):
+        locale = negotiate(request.headers.get("accept-language"), request.query_params.get("lang"))
         if body.dialect != "postgres":
-            return {
+            return translate_payload({
                 "parsed": False,
                 "findings": [
                     {
@@ -76,10 +81,10 @@ def create_app(db_path: str = ":memory:") -> FastAPI:
                 ],
                 "index_candidates": [],
                 "performance_claim": None,
-            }
+            }, locale)
         report = diagnose(body.sql, body.explain, body.dialect, body.existing_indexes)
         report_id = app.state.history.add(report)
-        return {"id": report_id, "report": report}
+        return translate_payload({"id": report_id, "report": report}, locale)
 
     @app.get("/api/reports/{left_id}/compare/{right_id}")
     def compare(left_id: str, right_id: str):

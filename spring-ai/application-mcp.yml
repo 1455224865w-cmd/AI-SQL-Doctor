@@ -1,0 +1,12 @@
+spring:
+  ai:
+    mcp:
+      client:
+        type: SYNC
+        toolcallback:
+          enabled: true
+        streamable-http:
+          connections:
+            ai-sql-doctor:
+              url: http://127.0.0.1:8003
+              endpoint: /mcp
