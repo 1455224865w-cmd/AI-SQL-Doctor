@@ -73,3 +73,13 @@ def test_join_without_condition_is_not_a_speedup():
     assert report["performance_claim"] is None
     matched = diagnose("SELECT orders.id FROM orders JOIN customers ON orders.id = customers.order_id")
     assert all(finding["name"] != "连接没有条件" for finding in matched["findings"])
+
+
+def test_buffer_reads_do_not_become_a_speedup():
+    text = """
+Seq Scan on orders  (cost=0.00..10.00 rows=10 width=4) (actual time=0.1..1.0 rows=10 loops=1)
+  Buffers: shared hit=1 read=500
+"""
+    report = diagnose("SELECT id FROM orders", text)
+    assert any(item["name"] == "缓存读入偏多" for item in report["findings"])
+    assert report["performance_claim"] is None

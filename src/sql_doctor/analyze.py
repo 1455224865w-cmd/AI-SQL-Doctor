@@ -217,8 +217,12 @@ def _parse_explain_text(text: str) -> list[dict]:
             continue
         detail = raw.strip()
         removed = re.search(r"Rows Removed by Filter:\s*(\d+)", detail)
+        buffers = re.search(r"shared hit=(\d+).*?read=(\d+)", detail)
         if removed:
             current["rows_removed"] = int(removed.group(1))
+        elif buffers:
+            current["shared_hit"] = int(buffers.group(1))
+            current["shared_read"] = int(buffers.group(2))
         elif detail.startswith("Filter:"):
             current["filter"] = detail
     return nodes
@@ -283,6 +287,21 @@ def _explain_findings(nodes: list[dict]) -> list[dict]:
             )
         estimate = node["estimated_rows"]
         actual = node["actual_rows"]
+        hit = node.get("shared_hit")
+        read = node.get("shared_read")
+        if hit is not None and read is not None and read >= 100 and read > hit * 10:
+            found.append(
+                finding(
+                    "缓存读入偏多",
+                    "info",
+                    node["evidence"],
+                    "计划文本里的 shared read 明显高于 shared hit。这是当时的缓存现象，不是稳定的耗时结论。",
+                    "冷缓存或大范围读取都会出现这种情况。",
+                    "在相近负载下再取一次 EXPLAIN ANALYZE，确认不是偶发的冷启动。",
+                    "不能据此直接加索引。",
+                    "比较两次实际时间，不把 read 的差值写成提升比例。",
+                )
+            )
         removed = node.get("rows_removed")
         if removed is not None and node["actual_rows"] is not None and removed > node["actual_rows"] * 10:
             found.append(
