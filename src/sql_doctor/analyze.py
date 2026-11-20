@@ -224,6 +224,46 @@ def _explain_findings(nodes: list[dict]) -> list[dict]:
     return found
 
 
+def cost_shares(nodes: list[dict]) -> list[dict]:
+    """独占成本占比来自规划器估算，不是实测耗时，也不能换成提升比例。"""
+    if not nodes:
+        return []
+    total = max(node["cost_end"] for node in nodes)
+    rows = []
+    for index, node in enumerate(nodes):
+        child_cost = 0.0
+        for later in nodes[index + 1 :]:
+            if later["depth"] <= node["depth"]:
+                break
+            if later["depth"] == node["depth"] + 1:
+                child_cost += later["cost_end"]
+        exclusive = max(0.0, node["cost_end"] - child_cost)
+        rows.append({**node, "exclusive_cost": exclusive, "cost_share": (exclusive / total) if total else None})
+    return rows
+
+
+def _cost_findings(shares: list[dict]) -> list[dict]:
+    found = []
+    for node in shares:
+        share = node["cost_share"]
+        observed = max(node["estimated_rows"], node["actual_rows"] or 0)
+        if share is None or share < 0.5 or observed < 1000:
+            continue
+        found.append(
+            finding(
+                "计划成本集中",
+                "info",
+                node["evidence"],
+                "这个节点的独占计划成本占整棵计划的一半以上。数字来自规划器估算，不是实测耗时。",
+                "读计划时可以先看这个节点，但估算成本高不等于查询已经变慢。",
+                "用 EXPLAIN ANALYZE 的实际时间核对，再决定要不要改索引或 SQL。",
+                "只按估算成本改索引可能没有收益。",
+                "比较两次 EXPLAIN ANALYZE 的实际时间，不把估算成本差写成提升比例。",
+            )
+        )
+    return found
+
+
 def diagnose(sql: str, explain: str | None = None, dialect: str = "postgres", existing_indexes: list[list[str]] | None = None) -> dict:
     try:
         parsed = sqlglot.parse_one(sql, read=dialect)
@@ -250,12 +290,14 @@ def diagnose(sql: str, explain: str | None = None, dialect: str = "postgres", ex
         }
     structure = _structure(parsed)
     nodes = parse_explain(explain) if explain else []
+    shares = cost_shares(nodes)
     return {
         "parsed": True,
         "formatted": parsed.sql(dialect=dialect, pretty=True),
         "structure": structure,
         "explain_nodes": nodes,
-        "findings": _sql_findings(parsed, structure) + _explain_findings(nodes),
+        "cost_shares": shares,
+        "findings": _sql_findings(parsed, structure) + _explain_findings(nodes) + _cost_findings(shares),
         "index_candidates": _index_candidates(parsed, existing_indexes),
         "performance_claim": None,
     }
