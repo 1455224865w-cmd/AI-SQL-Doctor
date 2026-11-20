@@ -26,4 +26,7 @@ def test_english_findings_keep_no_speedup_claim():
     assert payload["performance_claim"] is None
     assert "speedup" in payload["message"]
     spring = (ROOT / "spring-ai" / "application-mcp.yml").read_text(encoding="utf-8")
-    assert "streamable-http:" in spring and "endpoint: /mcp" in spring
+    sample = (ROOT / "nacos" / "spring-mcp.yaml").read_text(encoding="utf-8")
+    assert "nacos:" in spring
+    assert "127.0.0.1" not in spring
+    assert "${MCP_SERVICE_URL}" in sample
