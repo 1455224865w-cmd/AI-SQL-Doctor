@@ -1,0 +1,257 @@
+"""SQL 结构、执行计划文本和候选优化。建议都是候选，不表示已经变快。"""
+
+from __future__ import annotations
+
+import re
+
+import sqlglot
+from sqlglot import exp
+from sqlglot.errors import ParseError
+
+NODE_RE = re.compile(
+    r"^(?P<kind>.+?)(?:\s+on\s+(?P<relation>\S+))?\s+"
+    r"\(cost=(?P<cost_start>[\d.]+)\.\.(?P<cost_end>[\d.]+)\s+rows=(?P<rows>\d+)\s+width=(?P<width>\d+)\)"
+    r"(?:\s+\(actual time=(?P<actual_start>[\d.]+)\.\.(?P<actual_end>[\d.]+)\s+"
+    r"rows=(?P<actual_rows>\d+)\s+loops=(?P<loops>\d+)\))?"
+)
+
+
+def finding(name, severity, evidence, reason, impact, direction, risk, verification) -> dict:
+    return {
+        "name": name,
+        "severity": severity,
+        "evidence": evidence,
+        "reason": reason,
+        "impact": impact,
+        "direction": direction,
+        "risk": risk,
+        "verification": verification,
+    }
+
+
+def format_sql(sql: str, dialect: str = "postgres") -> str:
+    return sqlglot.parse_one(sql, read=dialect).sql(dialect=dialect, pretty=True)
+
+
+def _structure(parsed) -> dict:
+    likes = []
+    for item in parsed.find_all(exp.Like):
+        value = item.expression.this if isinstance(item.expression, exp.Literal) else item.expression.sql()
+        likes.append({"expression": item.sql(), "pattern": str(value)})
+    offset = parsed.args.get("offset")
+    limit = parsed.args.get("limit")
+    return {
+        "statement": type(parsed).__name__,
+        "tables": sorted({table.name for table in parsed.find_all(exp.Table)}),
+        "joins": [join.sql() for join in parsed.find_all(exp.Join)],
+        "ctes": [cte.alias for cte in parsed.find_all(exp.CTE)],
+        "group_by": parsed.args.get("group").sql() if parsed.args.get("group") else None,
+        "order_by": parsed.args.get("order").sql() if parsed.args.get("order") else None,
+        "limit": limit.sql() if limit else None,
+        "offset": int(offset.expression.this) if offset and isinstance(offset.expression, exp.Literal) else None,
+        "likes": likes,
+        "select_star": any(True for _ in parsed.find_all(exp.Star)),
+    }
+
+
+def _sql_findings(parsed, structure: dict) -> list[dict]:
+    found = []
+    if not isinstance(parsed, exp.Select):
+        found.append(
+            finding(
+                "非只读语句",
+                "high",
+                type(parsed).__name__,
+                "MVP 只分析语句，不执行它。写入语句默认被拒绝。",
+                "如果误执行，会改动数据或结构。",
+                "先改成只读的 EXPLAIN，或在独立环境由人确认后再执行。",
+                "工具不会自动执行这条语句。",
+                "确认连接账号没有写入权限。",
+            )
+        )
+        return found
+    if structure["select_star"]:
+        found.append(
+            finding(
+                "查询返回全部列",
+                "info",
+                "SELECT *",
+                "调用方如果只需要少数列，会多读数据。是否多余取决于业务。",
+                "列很多或含大字段时，I/O 会升高。",
+                "候选改写是列出实际使用的列。",
+                "漏列会改变结果，不能直接替换生产 SQL。",
+                "对照调用方使用的字段后，再用 EXPLAIN 比较。",
+            )
+        )
+    for item in structure["likes"]:
+        if str(item["pattern"]).startswith("%"):
+            found.append(
+                finding(
+                    "前导模糊匹配",
+                    "medium",
+                    item["expression"],
+                    "以 % 开头的 LIKE 通常用不上普通 B-Tree 索引。",
+                    "表变大后，这个条件可能变成大范围扫描。",
+                    "候选方案是改写匹配方式，或评估专门的文本索引。",
+                    "改写可能改变匹配结果。",
+                    "用同一批参数比较原 SQL 和候选 SQL 的结果集。",
+                )
+            )
+    if structure["offset"] and structure["offset"] > 1000:
+        found.append(
+            finding(
+                "深分页",
+                "medium",
+                f"OFFSET {structure['offset']}",
+                "大 OFFSET 仍要扫描并丢弃前面的行。",
+                "页码越往后越慢。",
+                "候选方案是用上一页的排序键做范围查询。",
+                "结果顺序和缺页行为可能变化。",
+                "在相近数据量上比较两版 EXPLAIN ANALYZE，并核对结果集。",
+            )
+        )
+    for func in parsed.find_all(exp.Lower, exp.Upper):
+        if isinstance(func.this, exp.Column):
+            found.append(
+                finding(
+                    "条件里的列套了函数",
+                    "medium",
+                    func.sql(),
+                    "普通 B-Tree 索引通常不能直接服务被函数包住的列。",
+                    "过滤选择性高时，可能退化为扫描更多行。",
+                    "候选方案是表达式索引，或把数据改成可直接比较的形式。",
+                    "表达式索引会增加写入成本。",
+                    "先看现有索引，再用 EXPLAIN 确认是否出现 Index Scan。",
+                )
+            )
+    return found
+
+
+def _index_candidates(parsed) -> list[dict]:
+    if not isinstance(parsed, exp.Select):
+        return []
+    where = parsed.args.get("where")
+    columns = []
+    if where:
+        for eq in where.find_all(exp.EQ):
+            if isinstance(eq.this, exp.Column):
+                columns.append(eq.this.name)
+    order = parsed.args.get("order")
+    order_columns = []
+    if order:
+        for ordered in order.find_all(exp.Ordered):
+            if isinstance(ordered.this, exp.Column):
+                order_columns.append(ordered.this.name)
+    if not columns and not order_columns:
+        return []
+    ordered_unique = []
+    for name in columns + order_columns:
+        if name not in ordered_unique:
+            ordered_unique.append(name)
+    return [
+        {
+            "columns": ordered_unique,
+            "statement": "CREATE INDEX 候选 (" + ", ".join(ordered_unique) + ")",
+            "reason": "等值条件放在前面，排序列放在后面，只是候选顺序。",
+            "risk": "索引增加写入和存储成本，也不能保证变快。",
+            "verification": "在测试库创建后比较 EXPLAIN ANALYZE，确认仍返回相同结果。不要在生产直接创建。",
+        }
+    ]
+
+
+def parse_explain(text: str) -> list[dict]:
+    nodes = []
+    for raw in text.splitlines():
+        if "(cost=" not in raw:
+            continue
+        body = raw.strip()
+        if body.startswith("->"):
+            body = body[2:].strip()
+        matched = NODE_RE.match(body)
+        if not matched:
+            continue
+        data = matched.groupdict()
+        indent = len(raw) - len(raw.lstrip(" "))
+        node = {
+            "kind": data["kind"].strip(),
+            "relation": data["relation"],
+            "estimated_rows": int(data["rows"]),
+            "cost_start": float(data["cost_start"]),
+            "cost_end": float(data["cost_end"]),
+            "actual_rows": int(data["actual_rows"]) if data["actual_rows"] else None,
+            "depth": indent // 2,
+            "evidence": raw.strip(),
+        }
+        nodes.append(node)
+    return nodes
+
+
+def _explain_findings(nodes: list[dict]) -> list[dict]:
+    found = []
+    for node in nodes:
+        if node["kind"].startswith("Seq Scan"):
+            found.append(
+                finding(
+                    "顺序扫描",
+                    "info",
+                    node["evidence"],
+                    "顺序扫描本身不是错误。小表或需要读出大部分行时，它可能是合理计划。",
+                    "表很大且过滤后只剩很少行时，才值得检查索引和条件。",
+                    "结合过滤条件和现有索引判断，不要只因为看到 Seq Scan 就加索引。",
+                    "盲目加索引可能没有收益。",
+                    "看实际行数、过滤条件和现有索引后再决定。",
+                )
+            )
+        estimate = node["estimated_rows"]
+        actual = node["actual_rows"]
+        if actual is not None and estimate > 0 and (actual / estimate > 10 or estimate / actual > 10):
+            found.append(
+                finding(
+                    "行数估算误差",
+                    "medium",
+                    node["evidence"],
+                    "估算行数和实际行数相差超过 10 倍。",
+                    "优化器可能因此选错连接或扫描方式。",
+                    "先更新统计信息，再重新 EXPLAIN ANALYZE。",
+                    "统计信息变化后计划可能改变，需要重新验证。",
+                    "比较 ANALYZE 前后的同一条 SQL。",
+                )
+            )
+    return found
+
+
+def diagnose(sql: str, explain: str | None = None, dialect: str = "postgres") -> dict:
+    try:
+        parsed = sqlglot.parse_one(sql, read=dialect)
+    except ParseError as exc:
+        return {
+            "parsed": False,
+            "formatted": None,
+            "structure": None,
+            "explain_nodes": [],
+            "findings": [
+                finding(
+                    "SQL 无法解析",
+                    "high",
+                    str(exc).splitlines()[0],
+                    "解析器没有得到完整语句，后续诊断没有可靠结构。",
+                    "不能在错误 SQL 上给出优化结论。",
+                    "先修正语法。",
+                    "无。",
+                    "用数据库的语法检查确认语句。",
+                )
+            ],
+            "index_candidates": [],
+            "performance_claim": None,
+        }
+    structure = _structure(parsed)
+    nodes = parse_explain(explain) if explain else []
+    return {
+        "parsed": True,
+        "formatted": parsed.sql(dialect=dialect, pretty=True),
+        "structure": structure,
+        "explain_nodes": nodes,
+        "findings": _sql_findings(parsed, structure) + _explain_findings(nodes),
+        "index_candidates": _index_candidates(parsed),
+        "performance_claim": None,
+    }
