@@ -127,7 +127,7 @@ def _sql_findings(parsed, structure: dict) -> list[dict]:
     return found
 
 
-def _index_candidates(parsed) -> list[dict]:
+def _index_candidates(parsed, existing: list[list[str]] | None = None) -> list[dict]:
     if not isinstance(parsed, exp.Select):
         return []
     where = parsed.args.get("where")
@@ -148,15 +148,19 @@ def _index_candidates(parsed) -> list[dict]:
     for name in columns + order_columns:
         if name not in ordered_unique:
             ordered_unique.append(name)
-    return [
-        {
-            "columns": ordered_unique,
-            "statement": "CREATE INDEX 候选 (" + ", ".join(ordered_unique) + ")",
-            "reason": "等值条件放在前面，排序列放在后面，只是候选顺序。",
-            "risk": "索引增加写入和存储成本，也不能保证变快。",
-            "verification": "在测试库创建后比较 EXPLAIN ANALYZE，确认仍返回相同结果。不要在生产直接创建。",
-        }
-    ]
+    candidate = {
+        "columns": ordered_unique,
+        "statement": "CREATE INDEX 候选 (" + ", ".join(ordered_unique) + ")",
+        "reason": "等值条件放在前面，排序列放在后面，只是候选顺序。",
+        "risk": "索引增加写入和存储成本，也不能保证变快。",
+        "verification": "在测试库创建后比较 EXPLAIN ANALYZE，确认仍返回相同结果。不要在生产直接创建。",
+        "checked_existing": existing is not None,
+    }
+    if existing is not None:
+        known = [tuple(name.lower() for name in columns) for columns in existing]
+        if tuple(name.lower() for name in ordered_unique) in known:
+            return []
+    return [candidate]
 
 
 def parse_explain(text: str) -> list[dict]:
@@ -220,7 +224,7 @@ def _explain_findings(nodes: list[dict]) -> list[dict]:
     return found
 
 
-def diagnose(sql: str, explain: str | None = None, dialect: str = "postgres") -> dict:
+def diagnose(sql: str, explain: str | None = None, dialect: str = "postgres", existing_indexes: list[list[str]] | None = None) -> dict:
     try:
         parsed = sqlglot.parse_one(sql, read=dialect)
     except ParseError as exc:
@@ -252,6 +256,26 @@ def diagnose(sql: str, explain: str | None = None, dialect: str = "postgres") ->
         "structure": structure,
         "explain_nodes": nodes,
         "findings": _sql_findings(parsed, structure) + _explain_findings(nodes),
-        "index_candidates": _index_candidates(parsed),
+        "index_candidates": _index_candidates(parsed, existing_indexes),
         "performance_claim": None,
     }
+
+
+def compare_plans(before: list[dict], after: list[dict]) -> dict:
+    """并排比较两次计划。没有实测耗时时不给出提升比例。"""
+    return {
+        "before_nodes": before,
+        "after_nodes": after,
+        "before_count": len(before),
+        "after_count": len(after),
+        "performance_claim": None,
+    }
+
+
+def explain_readonly(sql: str, connection, dialect: str = "postgres") -> str:
+    """只把 SELECT 的 EXPLAIN 交给连接。写入语句不会被发送。"""
+    parsed = sqlglot.parse_one(sql, read=dialect)
+    if not isinstance(parsed, exp.Select):
+        raise PermissionError("只允许对 SELECT 执行 EXPLAIN，不会把语句发给数据库")
+    statement = "EXPLAIN " + parsed.sql(dialect=dialect)
+    return connection.execute(statement)

@@ -1,19 +1,57 @@
 """提交 SQL 和可选的 EXPLAIN 文本。接口不接受数据库口令。"""
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from __future__ import annotations
 
-from sql_doctor.analyze import diagnose
+import json
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+from sql_doctor.analyze import compare_plans, diagnose
 
 
 class DiagnoseIn(BaseModel):
     sql: str
     explain: str | None = None
     dialect: str = "postgres"
+    existing_indexes: list[list[str]] | None = None
 
 
-def create_app() -> FastAPI:
+class History:
+    def __init__(self, path: str):
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reports (
+              id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.commit()
+
+    def add(self, report: dict) -> str:
+        report_id = uuid.uuid4().hex
+        self.conn.execute(
+            "INSERT INTO reports VALUES (?, ?, ?)",
+            (report_id, json.dumps(report, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+        return report_id
+
+    def get(self, report_id: str) -> dict:
+        row = self.conn.execute("SELECT payload FROM reports WHERE id=?", (report_id,)).fetchone()
+        if row is None:
+            raise KeyError(report_id)
+        return json.loads(row["payload"])
+
+
+def create_app(db_path: str = ":memory:") -> FastAPI:
     app = FastAPI(title="AI SQL Doctor", version="0.1.0")
+    app.state.history = History(db_path)
 
     @app.get("/api/health")
     def health():
@@ -39,9 +77,20 @@ def create_app() -> FastAPI:
                 "index_candidates": [],
                 "performance_claim": None,
             }
-        return diagnose(body.sql, body.explain, body.dialect)
+        report = diagnose(body.sql, body.explain, body.dialect, body.existing_indexes)
+        report_id = app.state.history.add(report)
+        return {"id": report_id, "report": report}
+
+    @app.get("/api/reports/{left_id}/compare/{right_id}")
+    def compare(left_id: str, right_id: str):
+        try:
+            left = app.state.history.get(left_id)
+            right = app.state.history.get(right_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="诊断记录不存在") from exc
+        return compare_plans(left.get("explain_nodes") or [], right.get("explain_nodes") or [])
 
     return app
 
 
-app = create_app()
+app = create_app("sql-doctor.sqlite3")
