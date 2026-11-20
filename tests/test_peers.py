@@ -64,3 +64,12 @@ Seq Scan on orders  (cost=0.00..1000.00 rows=1000 width=4) (actual time=0.100..2
     with pytest.raises(PermissionError):
         explain_readonly("SELECT id FROM orders; DELETE FROM orders", conn)
     assert conn.statements == []
+
+
+def test_join_without_condition_is_not_a_speedup():
+    report = diagnose("SELECT orders.id FROM orders JOIN customers")
+    item = next(finding for finding in report["findings"] if finding["name"] == "连接没有条件")
+    assert item["severity"] == "info"
+    assert report["performance_claim"] is None
+    matched = diagnose("SELECT orders.id FROM orders JOIN customers ON orders.id = customers.order_id")
+    assert all(finding["name"] != "连接没有条件" for finding in matched["findings"])

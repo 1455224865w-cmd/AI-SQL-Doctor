@@ -111,6 +111,20 @@ def _sql_findings(parsed, structure: dict) -> list[dict]:
                 "在相近数据量上比较两版 EXPLAIN ANALYZE，并核对结果集。",
             )
         )
+    for join in parsed.find_all(exp.Join):
+        if join.args.get("on") is None and not join.args.get("using"):
+            found.append(
+                finding(
+                    "连接没有条件",
+                    "info",
+                    join.sql(),
+                    "这个连接没有 ON 或 USING。它会按交叉连接解释，有时是有意写的。",
+                    "两边行数都大时，结果集会迅速变大。",
+                    "如果本意是等值连接，补上连接条件后再比较结果。",
+                    "补错条件会改变结果集。",
+                    "核对连接键，并用同一批数据比较行数。不写提升比例。",
+                )
+            )
     for func in parsed.find_all(exp.Lower, exp.Upper):
         if isinstance(func.this, exp.Column):
             found.append(
