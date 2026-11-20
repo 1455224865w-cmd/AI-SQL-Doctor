@@ -1,3 +1,5 @@
+import pytest
+
 from sql_doctor.analyze import cost_shares, diagnose, parse_explain
 
 SQL = "SELECT id FROM orders WHERE customer_id = 1"
@@ -17,3 +19,48 @@ def test_cost_share_stays_an_estimate():
     tiny = diagnose(SQL, "Seq Scan on orders  (cost=0.00..1.00 rows=1 width=4)")
     assert tiny["performance_claim"] is None
     assert all(item["name"] != "计划成本集中" for item in tiny["findings"])
+
+
+def test_json_plan_filter_and_multiple_statements():
+    import json
+    from sql_doctor.analyze import explain_readonly
+
+    text = """
+Seq Scan on orders  (cost=0.00..1000.00 rows=1000 width=4) (actual time=0.100..2.000 rows=10 loops=1)
+  Filter: (status = 'open')
+  Rows Removed by Filter: 5000
+"""
+    report = diagnose("SELECT id FROM orders WHERE status = 'open'", text)
+    assert any(item["name"] == "过滤丢弃了大量行" for item in report["findings"])
+    assert report["performance_claim"] is None
+    payload = json.dumps([{
+        "Plan": {
+            "Node Type": "Index Scan",
+            "Relation Name": "orders",
+            "Startup Cost": 0.29,
+            "Total Cost": 8.31,
+            "Plan Rows": 1,
+            "Plan Width": 4,
+            "Actual Rows": 1,
+            "Plans": [],
+        }
+    }])
+    nodes = parse_explain(payload)
+    assert nodes[0]["kind"] == "Index Scan"
+    assert nodes[0]["relation"] == "orders"
+    multi = diagnose("SELECT id FROM orders; DELETE FROM orders")
+    assert multi["parsed"] is False
+    assert multi["findings"][0]["name"] == "包含多条语句"
+    assert multi["performance_claim"] is None
+
+    class Conn:
+        def __init__(self):
+            self.statements = []
+        def execute(self, statement):
+            self.statements.append(statement)
+            return "ok"
+
+    conn = Conn()
+    with pytest.raises(PermissionError):
+        explain_readonly("SELECT id FROM orders; DELETE FROM orders", conn)
+    assert conn.statements == []

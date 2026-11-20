@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 import sqlglot
@@ -164,29 +165,89 @@ def _index_candidates(parsed, existing: list[list[str]] | None = None) -> list[d
 
 
 def parse_explain(text: str) -> list[dict]:
+    stripped = text.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        return _parse_explain_json(stripped)
+    return _parse_explain_text(text)
+
+
+def _parse_explain_text(text: str) -> list[dict]:
     nodes = []
+    current = None
     for raw in text.splitlines():
-        if "(cost=" not in raw:
+        if "(cost=" in raw:
+            body = raw.strip()
+            if body.startswith("->"):
+                body = body[2:].strip()
+            matched = NODE_RE.match(body)
+            if not matched:
+                current = None
+                continue
+            data = matched.groupdict()
+            indent = len(raw) - len(raw.lstrip(" "))
+            current = {
+                "kind": data["kind"].strip(),
+                "relation": data["relation"],
+                "estimated_rows": int(data["rows"]),
+                "cost_start": float(data["cost_start"]),
+                "cost_end": float(data["cost_end"]),
+                "actual_rows": int(data["actual_rows"]) if data["actual_rows"] else None,
+                "depth": indent // 2,
+                "evidence": raw.strip(),
+                "filter": None,
+                "rows_removed": None,
+            }
+            nodes.append(current)
             continue
-        body = raw.strip()
-        if body.startswith("->"):
-            body = body[2:].strip()
-        matched = NODE_RE.match(body)
-        if not matched:
+        if current is None:
             continue
-        data = matched.groupdict()
-        indent = len(raw) - len(raw.lstrip(" "))
-        node = {
-            "kind": data["kind"].strip(),
-            "relation": data["relation"],
-            "estimated_rows": int(data["rows"]),
-            "cost_start": float(data["cost_start"]),
-            "cost_end": float(data["cost_end"]),
-            "actual_rows": int(data["actual_rows"]) if data["actual_rows"] else None,
-            "depth": indent // 2,
-            "evidence": raw.strip(),
-        }
-        nodes.append(node)
+        detail = raw.strip()
+        removed = re.search(r"Rows Removed by Filter:\s*(\d+)", detail)
+        if removed:
+            current["rows_removed"] = int(removed.group(1))
+        elif detail.startswith("Filter:"):
+            current["filter"] = detail
+    return nodes
+
+
+def _parse_explain_json(text: str) -> list[dict]:
+    if len(text) > 1_000_000:
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    plans = []
+    if isinstance(data, list):
+        plans.extend(item.get("Plan") for item in data if isinstance(item, dict) and isinstance(item.get("Plan"), dict))
+    elif isinstance(data, dict) and isinstance(data.get("Plan"), dict):
+        plans.append(data["Plan"])
+    nodes = []
+
+    def walk(plan: dict, depth: int) -> None:
+        if depth > 30:
+            return
+        removed = plan.get("Rows Removed by Filter")
+        nodes.append(
+            {
+                "kind": str(plan.get("Node Type") or ""),
+                "relation": plan.get("Relation Name"),
+                "estimated_rows": int(plan.get("Plan Rows") or 0),
+                "cost_start": float(plan.get("Startup Cost") or 0),
+                "cost_end": float(plan.get("Total Cost") or 0),
+                "actual_rows": int(plan["Actual Rows"]) if "Actual Rows" in plan else None,
+                "depth": depth,
+                "evidence": str(plan.get("Node Type") or ""),
+                "filter": plan.get("Filter"),
+                "rows_removed": int(removed) if isinstance(removed, int) else None,
+            }
+        )
+        for child in plan.get("Plans") or []:
+            if isinstance(child, dict):
+                walk(child, depth + 1)
+
+    for plan in plans:
+        walk(plan, 0)
     return nodes
 
 
@@ -208,6 +269,20 @@ def _explain_findings(nodes: list[dict]) -> list[dict]:
             )
         estimate = node["estimated_rows"]
         actual = node["actual_rows"]
+        removed = node.get("rows_removed")
+        if removed is not None and node["actual_rows"] is not None and removed > node["actual_rows"] * 10:
+            found.append(
+                finding(
+                    "过滤丢弃了大量行",
+                    "info",
+                    node.get("filter") or node["evidence"],
+                    "扫描之后丢掉的行数超过保留行数的 10 倍。这是计划文本里的证据，不是已经变慢的结论。",
+                    "条件选择性可能很差，或者统计信息过时。",
+                    "先核对过滤条件能否更早缩小范围，再用 EXPLAIN ANALYZE 比较。",
+                    "改写条件可能改变结果集。",
+                    "比较改写前后的结果集和实际时间，不写提升比例。",
+                )
+            )
         if actual is not None and estimate > 0 and (actual / estimate > 10 or estimate / actual > 10):
             found.append(
                 finding(
@@ -264,7 +339,37 @@ def _cost_findings(shares: list[dict]) -> list[dict]:
     return found
 
 
+def _statements(sql: str, dialect: str) -> list:
+    return [item for item in sqlglot.parse(sql, read=dialect) if item is not None]
+
+
 def diagnose(sql: str, explain: str | None = None, dialect: str = "postgres", existing_indexes: list[list[str]] | None = None) -> dict:
+    try:
+        statements = _statements(sql, dialect)
+    except ParseError as exc:
+        statements = None
+    if statements is not None and len(statements) > 1:
+        return {
+            "parsed": False,
+            "formatted": None,
+            "structure": None,
+            "explain_nodes": [],
+            "cost_shares": [],
+            "findings": [
+                finding(
+                    "包含多条语句",
+                    "high",
+                    f"{len(statements)} 条语句",
+                    "一次诊断只接受一条语句，避免后面的写入被前面的查询带过去。",
+                    "如果整段被执行，可能改动数据。",
+                    "拆成单条语句后再诊断。",
+                    "工具不会执行这段文本。",
+                    "确认文本里只剩一条 SELECT。",
+                )
+            ],
+            "index_candidates": [],
+            "performance_claim": None,
+        }
     try:
         parsed = sqlglot.parse_one(sql, read=dialect)
     except ParseError as exc:
@@ -315,9 +420,9 @@ def compare_plans(before: list[dict], after: list[dict]) -> dict:
 
 
 def explain_readonly(sql: str, connection, dialect: str = "postgres") -> str:
-    """只把 SELECT 的 EXPLAIN 交给连接。写入语句不会被发送。"""
-    parsed = sqlglot.parse_one(sql, read=dialect)
-    if not isinstance(parsed, exp.Select):
-        raise PermissionError("只允许对 SELECT 执行 EXPLAIN，不会把语句发给数据库")
-    statement = "EXPLAIN " + parsed.sql(dialect=dialect)
+    """只把单条 SELECT 的 EXPLAIN 交给连接。写入语句和后续语句都不会被发送。"""
+    statements = _statements(sql, dialect)
+    if len(statements) != 1 or not isinstance(statements[0], exp.Select):
+        raise PermissionError("只允许对单条 SELECT 执行 EXPLAIN，不会把语句发给数据库")
+    statement = "EXPLAIN " + statements[0].sql(dialect=dialect)
     return connection.execute(statement)
