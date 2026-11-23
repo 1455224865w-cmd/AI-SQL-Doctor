@@ -7,7 +7,11 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from sql_doctor.analyze import compare_plans, diagnose
@@ -44,6 +48,22 @@ class History:
         self.conn.commit()
         return report_id
 
+    def recent(self, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT id, payload, created_at FROM reports ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        items = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            items.append({
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "parsed": payload.get("parsed"),
+                "finding_count": len(payload.get("findings") or []),
+            })
+        return items
+
     def get(self, report_id: str) -> dict:
         row = self.conn.execute("SELECT payload FROM reports WHERE id=?", (report_id,)).fetchone()
         if row is None:
@@ -51,10 +71,21 @@ class History:
         return json.loads(row["payload"])
 
 
+def _mount_console(app: FastAPI) -> None:
+    web = Path(__file__).resolve().parent / "web"
+
+    @app.get("/", include_in_schema=False)
+    def console_page():
+        return FileResponse(web / "index.html")
+
+    app.mount("/assets", StaticFiles(directory=web), name="assets")
+
+
 def create_app(db_path: str = ":memory:") -> FastAPI:
-    app = FastAPI(title="AI SQL Doctor", version="0.1.7")
+    app = FastAPI(title="AI SQL Doctor", version="0.1.8")
     install(app)
     mount(app)
+    _mount_console(app)
     app.state.history = History(db_path)
 
     @app.get("/api/health")
@@ -85,6 +116,10 @@ def create_app(db_path: str = ":memory:") -> FastAPI:
         report = diagnose(body.sql, body.explain, body.dialect, body.existing_indexes)
         report_id = app.state.history.add(report)
         return translate_payload({"id": report_id, "report": report}, locale)
+
+    @app.get("/api/reports")
+    def reports():
+        return app.state.history.recent()
 
     @app.get("/api/reports/{left_id}/compare/{right_id}")
     def compare(left_id: str, right_id: str):
