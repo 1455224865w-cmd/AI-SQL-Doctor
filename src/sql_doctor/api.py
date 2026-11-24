@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from sql_doctor.analyze import compare_plans, diagnose
+from sql_doctor.analyze import compare_plans, diagnose_for_dialect
 from sql_doctor.i18n import install, negotiate, translate_payload
 from sql_doctor.mcp_server import mount
 
@@ -95,25 +95,9 @@ def create_app(db_path: str = ":memory:") -> FastAPI:
     @app.post("/api/diagnose")
     def run(body: DiagnoseIn, request: Request):
         locale = negotiate(request.headers.get("accept-language"), request.query_params.get("lang"))
-        if body.dialect != "postgres":
-            return translate_payload({
-                "parsed": False,
-                "findings": [
-                    {
-                        "name": "暂不支持的数据库",
-                        "severity": "info",
-                        "evidence": body.dialect,
-                        "reason": "MVP 只实现 PostgreSQL 规则，避免把其他数据库的计划误判成同一套结论。",
-                        "impact": "不会给出跨数据库的优化承诺。",
-                        "direction": "使用 postgres。",
-                        "risk": "无。",
-                        "verification": "确认 EXPLAIN 来自 PostgreSQL。",
-                    }
-                ],
-                "index_candidates": [],
-                "performance_claim": None,
-            }, locale)
-        report = diagnose(body.sql, body.explain, body.dialect, body.existing_indexes)
+        report = diagnose_for_dialect(body.sql, body.explain, body.dialect, body.existing_indexes)
+        if report.get("parsed") is False and report.get("findings") and report["findings"][0].get("name") == "暂不支持的数据库":
+            return translate_payload(report, locale)
         report_id = app.state.history.add(report)
         return translate_payload({"id": report_id, "report": report}, locale)
 

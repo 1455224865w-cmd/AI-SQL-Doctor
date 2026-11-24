@@ -391,6 +391,47 @@ def _statements(sql: str, dialect: str) -> list:
     return [item for item in sqlglot.parse(sql, read=dialect) if item is not None]
 
 
+STRUCTURE_DIALECTS = {"postgres", "mysql"}
+
+
+def diagnose_for_dialect(sql: str, explain: str | None, dialect: str, existing_indexes: list[list[str]] | None = None) -> dict:
+    """MySQL 只做结构诊断。执行计划文本仍只按 PostgreSQL 解读。"""
+    if dialect not in STRUCTURE_DIALECTS:
+        return {
+            "parsed": False,
+            "findings": [
+                finding(
+                    "暂不支持的数据库",
+                    "info",
+                    dialect,
+                    "结构规则目前覆盖 PostgreSQL 和 MySQL。其他数据库的计划不会套进同一套结论。",
+                    "不会给出跨数据库的优化承诺。",
+                    "使用 postgres 或 mysql。",
+                    "无。",
+                    "确认语句方言后再诊断。",
+                )
+            ],
+            "index_candidates": [],
+            "performance_claim": None,
+        }
+    plan = explain if dialect == "postgres" else None
+    report = diagnose(sql, plan, dialect, existing_indexes)
+    if dialect != "postgres" and explain:
+        report["findings"].append(
+            finding(
+                "执行计划未解读",
+                "info",
+                dialect,
+                "语句结构已按该方言解析。附带的执行计划不是 PostgreSQL 文本，因此没有套用 Seq Scan、cost 这些规则。",
+                "不能把 MySQL 计划里的算子名写成 PostgreSQL 结论。",
+                "需要计划结论时，改用 PostgreSQL 的 EXPLAIN 文本。",
+                "无。",
+                "结构类发现仍然可以对照语句本身。",
+            )
+        )
+    return report
+
+
 def diagnose(sql: str, explain: str | None = None, dialect: str = "postgres", existing_indexes: list[list[str]] | None = None) -> dict:
     try:
         statements = _statements(sql, dialect)

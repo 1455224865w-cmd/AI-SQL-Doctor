@@ -149,7 +149,7 @@ SPECS = [
 
 
 def call_tool(name, arguments, locale):
-    from sql_doctor.analyze import diagnose
+    from sql_doctor.analyze import diagnose_for_dialect
 
     if name != "sql_diagnose":
         raise ToolError("未知工具")
@@ -161,23 +161,6 @@ def call_tool(name, arguments, locale):
     dialect = str(arguments.get("dialect") or "postgres")
     explain = arguments.get("explain")
     indexes = arguments.get("existing_indexes")
-    if dialect != "postgres":
-        return {
-            "parsed": False,
-            "findings": [{
-                "name": "暂不支持的数据库",
-                "severity": "info",
-                "evidence": dialect,
-                "reason": "MVP 只实现 PostgreSQL 规则，避免把其他数据库的计划误判成同一套结论。",
-                "impact": "不会给出跨数据库的优化承诺。",
-                "direction": "使用 postgres。",
-                "risk": "无。",
-                "verification": "确认 EXPLAIN 来自 PostgreSQL。",
-            }],
-            "index_candidates": [],
-            "performance_claim": None,
-            "message": text("tool.sql.result", locale),
-        }
-    report = diagnose(sql, explain if isinstance(explain, str) else None, dialect, indexes)
+    report = diagnose_for_dialect(sql, explain if isinstance(explain, str) else None, dialect, indexes)
     report["message"] = text("tool.sql.result", locale)
     return report

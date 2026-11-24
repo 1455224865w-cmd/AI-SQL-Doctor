@@ -4,7 +4,7 @@ AI SQL Doctor 解释 SQL 可能慢在哪里。证据来自 SQL 结构和 Postgre
 
 ## 0.1.0 能做什么
 
-- 用 `sqlglot` 格式化并解析 PostgreSQL 语句。
+- 用 `sqlglot` 格式化并解析 PostgreSQL 和 MySQL 语句。MySQL 只做结构诊断。
 - 识别表、JOIN、CTE、GROUP BY、ORDER BY、LIMIT 和 OFFSET。
 - 报告前导 `LIKE`、深分页、列上的 `lower`/`upper`、`SELECT *`。
 - 解析 EXPLAIN 节点的估算行数和实际行数。顺序扫描只作为信息，不直接判错。
@@ -15,7 +15,7 @@ AI SQL Doctor 解释 SQL 可能慢在哪里。证据来自 SQL 结构和 Postgre
 ## 不做的事
 
 - 不连接数据库，也不保存口令。
-- 不支持把 MySQL、SQL Server 或 Oracle 的计划套进 PostgreSQL 规则。
+- 不把 MySQL、SQL Server 或 Oracle 的执行计划套进 PostgreSQL 规则。MySQL 若附带计划文本，会明确标成未解读。
 - 不自动创建索引。
 
 ## 本地运行

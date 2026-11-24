@@ -1,4 +1,4 @@
-from sql_doctor.analyze import diagnose, parse_explain
+from sql_doctor.analyze import diagnose, diagnose_for_dialect, parse_explain
 
 SQL = """
 SELECT * FROM orders
@@ -63,3 +63,20 @@ def test_explain_tree_rows():
     assert [node["kind"] for node in nodes] == ["Limit", "Seq Scan"]
     assert nodes[1]["actual_rows"] == 5000
     assert nodes[1]["relation"] == "orders"
+
+
+def test_mysql_structure_does_not_read_postgres_plan():
+    report = diagnose_for_dialect(
+        "SELECT * FROM orders WHERE note LIKE '%rush%'",
+        "type: ALL\nrows: 1000",
+        "mysql",
+    )
+    names = {item["name"] for item in report["findings"]}
+    assert report["parsed"] is True
+    assert "查询返回全部列" in names
+    assert "前导模糊匹配" in names
+    assert "执行计划未解读" in names
+    assert "顺序扫描" not in names
+    refused = diagnose_for_dialect("SELECT 1", None, "oracle")
+    assert refused["parsed"] is False
+    assert refused["findings"][0]["name"] == "暂不支持的数据库"
