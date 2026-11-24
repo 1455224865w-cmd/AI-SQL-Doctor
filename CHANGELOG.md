@@ -1,5 +1,10 @@
 # 变更记录
 
+## 0.1.9
+
+- 镜像地址改为当前 GitHub 账号 `wangcheng-coder`。发布工作流用仓库所有者生成 `ghcr.io/${{ github.repository_owner }}/ai-sql-doctor`。
+- 实际行数为 0 时不再做除法。`lower` / `upper` 只在 WHERE 和 JOIN 条件里提示。
+
 ## 0.1.8
 
 - 增加统一控制台，并列出诊断记录的编号和发现数量，不返回 SQL。

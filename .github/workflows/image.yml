@@ -21,5 +21,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/1455224865w-cmd/ai-sql-doctor:latest
-            ghcr.io/1455224865w-cmd/ai-sql-doctor:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/ai-sql-doctor:latest
+            ghcr.io/${{ github.repository_owner }}/ai-sql-doctor:${{ github.sha }}

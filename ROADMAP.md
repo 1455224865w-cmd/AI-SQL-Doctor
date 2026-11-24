@@ -2,10 +2,10 @@
 
 ## 远程仓库
 
-- 仓库：https://github.com/1455224865w-cmd/AI-SQL-Doctor
+- 仓库：https://github.com/wangcheng-coder/AI-SQL-Doctor
 - `main` 已推送初始提交 `69237b5`。
 - CI 工作流是 `.github/workflows/ci.yml`，只安装项目并运行 `pytest`。
-- 首次推送的运行已成功：https://github.com/1455224865w-cmd/AI-SQL-Doctor/actions/runs/44689653062
+- 首次推送的运行已成功：https://github.com/wangcheng-coder/AI-SQL-Doctor/actions/runs/44689653062
 - Milestone「0.2 下一步」跟踪下面三个 Issue：
   - #1 只读连接测试库执行 EXPLAIN
   - #2 对照现有索引后再给候选

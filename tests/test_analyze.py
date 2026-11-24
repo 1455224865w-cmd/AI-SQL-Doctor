@@ -43,6 +43,21 @@ def test_broken_sql_has_no_fake_structure():
     assert report["structure"] is None
 
 
+def test_select_list_function_is_not_a_filter():
+    report = diagnose("SELECT lower(name) FROM users")
+    names = {item["name"] for item in report["findings"]}
+    assert "条件里的列套了函数" not in names
+
+
+def test_zero_actual_rows_does_not_divide_by_zero():
+    report = diagnose(
+        "SELECT id FROM users",
+        "Seq Scan on users  (cost=0.00..1.00 rows=10 width=4) (actual time=0.010..0.020 rows=0 loops=1)",
+    )
+    names = {item["name"] for item in report["findings"]}
+    assert "行数估算误差" in names
+
+
 def test_explain_tree_rows():
     nodes = parse_explain(EXPLAIN)
     assert [node["kind"] for node in nodes] == ["Limit", "Seq Scan"]

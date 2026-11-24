@@ -125,20 +125,29 @@ def _sql_findings(parsed, structure: dict) -> list[dict]:
                     "核对连接键，并用同一批数据比较行数。不写提升比例。",
                 )
             )
-    for func in parsed.find_all(exp.Lower, exp.Upper):
-        if isinstance(func.this, exp.Column):
-            found.append(
-                finding(
-                    "条件里的列套了函数",
-                    "medium",
-                    func.sql(),
-                    "普通 B-Tree 索引通常不能直接服务被函数包住的列。",
-                    "过滤选择性高时，可能退化为扫描更多行。",
-                    "候选方案是表达式索引，或把数据改成可直接比较的形式。",
-                    "表达式索引会增加写入成本。",
-                    "先看现有索引，再用 EXPLAIN 确认是否出现 Index Scan。",
+    scopes = []
+    where = parsed.args.get("where")
+    if where is not None:
+        scopes.append(where)
+    for join in parsed.find_all(exp.Join):
+        on_clause = join.args.get("on")
+        if on_clause is not None:
+            scopes.append(on_clause)
+    for scope in scopes:
+        for func in scope.find_all(exp.Lower, exp.Upper):
+            if isinstance(func.this, exp.Column):
+                found.append(
+                    finding(
+                        "条件里的列套了函数",
+                        "medium",
+                        func.sql(),
+                        "普通 B-Tree 索引通常不能直接服务被函数包住的列。",
+                        "过滤选择性高时，可能退化为扫描更多行。",
+                        "候选方案是表达式索引，或把数据改成可直接比较的形式。",
+                        "表达式索引会增加写入成本。",
+                        "先看现有索引，再用 EXPLAIN 确认是否出现 Index Scan。",
+                    )
                 )
-            )
     return found
 
 
@@ -205,7 +214,7 @@ def _parse_explain_text(text: str) -> list[dict]:
                 "estimated_rows": int(data["rows"]),
                 "cost_start": float(data["cost_start"]),
                 "cost_end": float(data["cost_end"]),
-                "actual_rows": int(data["actual_rows"]) if data["actual_rows"] else None,
+                "actual_rows": int(data["actual_rows"]) if data["actual_rows"] is not None else None,
                 "depth": indent // 2,
                 "evidence": raw.strip(),
                 "filter": None,
@@ -316,7 +325,13 @@ def _explain_findings(nodes: list[dict]) -> list[dict]:
                     "比较改写前后的结果集和实际时间，不写提升比例。",
                 )
             )
-        if actual is not None and estimate > 0 and (actual / estimate > 10 or estimate / actual > 10):
+        ratio_off = False
+        if actual is not None and estimate > 0:
+            if actual == 0:
+                ratio_off = True
+            elif actual / estimate > 10 or estimate / actual > 10:
+                ratio_off = True
+        if ratio_off:
             found.append(
                 finding(
                     "行数估算误差",
