@@ -80,3 +80,10 @@ def test_mysql_structure_does_not_read_postgres_plan():
     refused = diagnose_for_dialect("SELECT 1", None, "oracle")
     assert refused["parsed"] is False
     assert refused["findings"][0]["name"] == "暂不支持的数据库"
+
+
+def test_or_across_different_columns_is_reported():
+    mixed = diagnose("SELECT id FROM orders WHERE status = 'open' OR customer_id = 1")
+    assert "OR 连接不同列" in {item["name"] for item in mixed["findings"]}
+    same = diagnose("SELECT id FROM orders WHERE status = 'open' OR status = 'hold'")
+    assert "OR 连接不同列" not in {item["name"] for item in same["findings"]}

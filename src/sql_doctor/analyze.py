@@ -128,6 +128,25 @@ def _sql_findings(parsed, structure: dict) -> list[dict]:
     scopes = []
     where = parsed.args.get("where")
     if where is not None:
+        for node in where.find_all(exp.Or):
+            names = []
+            for column in node.find_all(exp.Column):
+                if column.name not in names:
+                    names.append(column.name)
+            if len(names) >= 2:
+                found.append(
+                    finding(
+                        "OR 连接不同列",
+                        "info",
+                        " OR ".join(names[:4]),
+                        "不同列用 OR 连接时，数据库常常不能把它们合成一次普通索引查找。",
+                        "表变大后，这个条件可能放大扫描范围。",
+                        "如果业务允许，拆成多次查询再合并，并核对是否必须同时成立。",
+                        "拆开可能改变空值和重复行。",
+                        "用同一批数据比较原语句和改写后的结果集，再用 EXPLAIN 看访问方式。不写提升比例。",
+                    )
+                )
+                break
         scopes.append(where)
     for join in parsed.find_all(exp.Join):
         on_clause = join.args.get("on")
